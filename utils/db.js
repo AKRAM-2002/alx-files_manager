@@ -26,6 +26,8 @@ class DBClient {
     this.client = new mongodb.MongoClient(dbURL, { useUnifiedTopology: true });
     // Establish the connection to the MongoDB server
     this.client.connect();
+    this.dbName = database; // Save the database name for later use
+    
   }
 
   /**
@@ -71,6 +73,11 @@ class DBClient {
     
     // Return the count of documents in the 'files' collection
     return collection.countDocuments();
+  }
+
+  // Getter to expose the database instance
+  getDatabase() {
+    return this.client.db(this.dbName);
   }
 }
 

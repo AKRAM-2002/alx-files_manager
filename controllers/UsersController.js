@@ -1,5 +1,7 @@
 import crypto from 'crypto';
 import dbClient from '../utils/db';  // Import the DB client
+import { ObjectId } from 'mongodb';
+import redisClient from '../utils/redis.js';
 
 /**
  * Handles the logic for user-related routes.
@@ -22,7 +24,7 @@ const postNew = async (req, res) => {
       return res.status(400).json({ error: 'Already exist' });
     }
 
-    // Hash the password using SHA1
+    // Hash the password using  1
     const hashedPassword = crypto.createHash('sha1').update(password).digest('hex');
 
     // Create a new user object
@@ -42,4 +44,28 @@ const postNew = async (req, res) => {
   }
 };
 
-export { postNew };
+const getMe = async(req, res) => {
+    const token = req.headers['x-token'];
+    console.log("Received token:", token);
+    const key = `auth_${token}`;
+
+    const userId = await redisClient.get(key);
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const user = await dbClient.getDatabase().collection('users').findOne({ 
+      _id: ObjectId(userId) 
+    });
+
+    if (!user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    return res.status(200).json({
+      id: user._id,
+      email: user.email
+    });
+}
+
+export { postNew, getMe };
