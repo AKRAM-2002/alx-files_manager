@@ -6,100 +6,107 @@ import dbClient from '../utils/db.js';
 import redisClient from '../utils/redis.js';
 import { ObjectId } from 'mongodb';
 import mime from 'mime-types';
+import Bull from 'bull';
+const fileQueue = new Bull('fileQueue');
 
 class FilesController{
     // POST /files
-    static async postUpload(req, res){
-        const { name, type, data, parentId = 0, isPublic = false } = req.body;
-        const token = req.headers['x-token'];
-
-        if (!name) return res.status(400).json({ error: 'Missing name' });
-          if (!type || !['folder', 'file', 'image'].includes(type)) {
-            return res.status(400).json({ error: 'Missing or invalid type' });
-          }
-        if (type !== 'folder' && !data) {
-            return res.status(400).json({ error: 'Missing data' });
-        }
-
-
-        // Validate token and retrieve user
-        const userId = await redisClient.get(`auth_${token}`);
-        if (!userId) 
-            return res.status(401).json({ error: 'Unauthorized' });
-
-        // Validate parentId if it's provided
-        if (parentId !== 0) {
-            const parent = await dbClient.client.db().collection('files').findOne({ _id: ObjectId(parentId) });
-            if (!parent) {
-                return res.status(400).json({ error: 'Parent not found' });
-            }
-            if (parent.type !== 'folder') {
-                return res.status(400).json({ error: 'Parent is not a folder' });
-            }
-        }
-
-        try {
-            // Handle file or image storage
-            if (type === 'file' || type === 'image') {
-              const buffer = Buffer.from(data, 'base64');
-              const fileId = uuidv4();
-              const folderPath = process.env.FOLDER_PATH || '/tmp/files_manager';
-        
-              // Ensure the folder exists
-            if (!fs.existsSync(folderPath)) {
-                fs.mkdirSync(folderPath, { recursive: true });
-            }
-    
-            const filePath = path.join(folderPath, fileId);
-            fs.writeFileSync(filePath, buffer);
-    
-            // Create file document in DB
-            const fileDocument = {
-                userId: ObjectId(userId),
-                name,
-                type,
-                isPublic,
-                parentId: ObjectId(parentId),
-                localPath: filePath,
-            };
-    
-            const result = await dbClient.client.db().collection('files').insertOne(fileDocument);
-            return res.status(201).json({
-                id: result.insertedId,
-                userId,
-                name: result.ops[0].name,
-                type: result.ops[0].type,
-                isPublic: result.ops[0].isPublic,
-                parentId: result.ops[0].parentId,
-            });
-        }
-    
-        // Handle folder creation
-        if (type === 'folder') {
-            const folderDocument = {
-                userId: ObjectId(userId),
-                name,
-                type,
-                isPublic,
-                parentId: ObjectId(parentId),
-            };
-    
-            const result = await dbClient.client.db().collection('files').insertOne(folderDocument);
-            return res.status(201).json({
-                id: result.insertedId,
-                userId,
-                name: result.ops[0].name,
-                type: result.ops[0].type,
-                isPublic: result.ops[0].isPublic,
-                parentId: result.ops[0].parentId,
-            });
-        }
-        } catch (err) {
-            console.error('Error while uploading file/folder:', err);
-            return res.status(500).json({ error: 'Internal server error' });
-        }
-
-    }
+   // POST /files
+   static async postUpload(req, res) {
+       const { name, type, data, parentId = 0, isPublic = false } = req.body;
+       const token = req.headers['x-token'];
+   
+       // Validate inputs
+       if (!name) return res.status(400).json({ error: 'Missing name' });
+       if (!type || !['folder', 'file', 'image'].includes(type)) {
+           return res.status(400).json({ error: 'Missing or invalid type' });
+       }
+       if (type !== 'folder' && !data) {
+           return res.status(400).json({ error: 'Missing data' });
+       }
+   
+       // Validate token and retrieve user
+       const userId = await redisClient.get(`auth_${token}`);
+       if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+   
+       // Validate parentId if provided
+       if (parentId !== 0) {
+           const parent = await dbClient.client.db().collection('files').findOne({ _id: ObjectId(parentId) });
+           if (!parent) {
+               return res.status(400).json({ error: 'Parent not found' });
+           }
+           if (parent.type !== 'folder') {
+               return res.status(400).json({ error: 'Parent is not a folder' });
+           }
+       }
+   
+       try {
+           if (type === 'file' || type === 'image') {
+               const buffer = Buffer.from(data, 'base64');
+               const fileId = uuidv4();
+               const folderPath = process.env.FOLDER_PATH || '/tmp/files_manager';
+   
+               // Ensure the folder exists
+               if (!fs.existsSync(folderPath)) {
+                   fs.mkdirSync(folderPath, { recursive: true });
+               }
+   
+               const filePath = path.join(folderPath, fileId);
+               fs.writeFileSync(filePath, buffer);
+   
+               // Create file document in DB
+               const fileDocument = {
+                   userId: ObjectId(userId),
+                   name,
+                   type,
+                   isPublic,
+                   parentId: parentId === 0 ? '0' : ObjectId(parentId),
+                   localPath: filePath,
+               };
+   
+               const result = await dbClient.client.db().collection('files').insertOne(fileDocument);
+   
+               // Add job to Bull queue if type is image
+               if (type === 'image') {
+                   fileQueue.add({ userId, fileId: result.insertedId });
+               }
+   
+               return res.status(201).json({
+                   id: result.insertedId,
+                   userId,
+                   name: fileDocument.name,
+                   type: fileDocument.type,
+                   isPublic: fileDocument.isPublic,
+                   parentId: fileDocument.parentId,
+               });
+           }
+   
+           // Handle folder creation
+           if (type === 'folder') {
+               const folderDocument = {
+                   userId: ObjectId(userId),
+                   name,
+                   type,
+                   isPublic,
+                   parentId: parentId === 0 ? '0' : ObjectId(parentId),
+               };
+   
+               const result = await dbClient.client.db().collection('files').insertOne(folderDocument);
+               return res.status(201).json({
+                   id: result.insertedId,
+                   userId,
+                   name: folderDocument.name,
+                   type: folderDocument.type,
+                   isPublic: folderDocument.isPublic,
+                   parentId: folderDocument.parentId,
+               });
+           }
+       } catch (err) {
+           console.error('Error while uploading file/folder:', err);
+           return res.status(500).json({ error: 'Internal server error' });
+       }
+   }
+   
 
     static async getShow(req, res){
 
@@ -226,6 +233,7 @@ class FilesController{
     static async getFile(req, res) {
       try {
         const { id } = req.params;
+        const { size } = req.query;
         const token = req.headers['x-token'];
     
         // Get the userId from Redis
@@ -256,6 +264,14 @@ class FilesController{
     
         // Check if the file exists locally
         const filePath = file.localPath;
+        if (size) {
+            const validSizes = ['500', '250', '100'];
+            if (!validSizes.includes(size)) {
+                return res.status(400).json({ error: 'Invalid size parameter' });
+            }
+            filePath = `${file.localPath}_${size}`;
+        }
+        
         if (!fs.existsSync(filePath)) {
             console.log(`File not found at path: ${filePath}`);
             return res.status(404).json({ error: 'Not found' });
